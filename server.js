@@ -5,21 +5,27 @@ const { getMessaging } = require("firebase-admin/messaging");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
+// Firebase-Servicekonto laden:
+// Auf Render aus der Umgebungsvariable,
+// auf dem PC weiterhin aus der lokalen JSON-Datei.
+let serviceAccount;
 
-// Firebase-Schlüssel im Server-Ordner suchen
-const keyFile = fs.readdirSync(__dirname)
-  .find(name =>
-    name.includes("firebase-adminsdk") &&
-    name.endsWith(".json")
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  console.log("Firebase-Schlüssel aus Render geladen.");
+} else {
+  const keyFile = fs.readdirSync(__dirname).find(
+    name => name.includes("firebase-adminsdk") && name.endsWith(".json")
   );
 
-if (!keyFile) {
-  console.error("Firebase-Servicekonto-Datei wurde nicht gefunden.");
-  process.exit(1);
+  if (!keyFile) {
+    console.error("Firebase-Servicekonto-Datei wurde nicht gefunden.");
+    process.exit(1);
+  }
+
+  serviceAccount = require(path.join(__dirname, keyFile));
+  console.log("Firebase-Schlüssel aus lokaler Datei geladen.");
 }
-
-const serviceAccount = require(path.join(__dirname, keyFile));
-
 // Firebase Admin starten
 initializeApp({
   credential: cert(serviceAccount)
