@@ -115,10 +115,9 @@ async function sendCallPush(userId, callerName, callId) {
       await messaging.send({
         token,
 
-        notification: {
-          title: "📞 Eingehender Anruf",
-          body: (callerName || "FamilienChat") + " ruft dich an"
-        },
+
+
+     
 
         data: {
           type: "call",
