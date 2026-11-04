@@ -5,7 +5,7 @@ const { getAuth } = require("firebase-admin/auth");
 const fs = require("fs");
 const http = require("http");
 const path = require("path");
-
+const crypto = require("crypto");
 let serviceAccount;
 
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -305,7 +305,7 @@ function setCorsHeaders(req, res) {
 
   res.setHeader(
     "Access-Control-Allow-Methods",
-    "GET, OPTIONS"
+    "GET, POST, OPTIONS"
   );
 }
 
@@ -328,7 +328,298 @@ async function verifyFirebaseUser(req) {
   );
 }
 
+/* =====================================================
+   FAMILIENCHAT – SICHERE EINLADUNGEN
+===================================================== */
 
+function inviteResponse(res, status, data) {
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+
+  res.end(JSON.stringify(data));
+}
+
+
+/* JSON-DATEN LESEN */
+
+async function readInviteJson(req) {
+  let raw = "";
+
+  for await (const chunk of req) {
+    raw += chunk;
+
+    if (raw.length > 10000) {
+      throw new Error("Anfrage zu groß");
+    }
+  }
+
+  return JSON.parse(raw || "{}");
+}
+
+
+/* EINLADUNG ERSTELLEN */
+
+async function createInvite(req, res) {
+
+  const caller = await verifyFirebaseUser(req);
+
+  const inviterRef = db
+    .collection("users")
+    .doc(caller.uid);
+
+  const inviter = await inviterRef.get();
+
+  if (!inviter.exists) {
+    return inviteResponse(res, 403, {
+      error: "Benutzer nicht gefunden."
+    });
+  }
+
+  const inviterData = inviter.data();
+
+  const role = inviterData.role;
+
+  if (role !== "admin" && role !== "familie") {
+    return inviteResponse(res, 403, {
+      error: "Nur Familienmitglieder dürfen einladen."
+    });
+  }
+
+  const body = await readInviteJson(req);
+
+  const type = body.type;
+
+  if (type !== "freund") {
+    return inviteResponse(res, 400, {
+      error: "Ungültige Einladungsart."
+    });
+  }
+
+  /* Freunde dürfen nur bestimmte Familienmitglieder einladen */
+
+  if (
+    type === "freund" &&
+    inviterData.friendContact !== true
+  ) {
+    return inviteResponse(res, 403, {
+      error: "Du darfst keine Freunde einladen."
+    });
+  }
+
+  /* Sicheren Einladungscode erstellen */
+
+  const token = crypto
+    .randomBytes(32)
+    .toString("hex");
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  const now = Date.now();
+
+  /* Einladung läuft nach sieben Tagen ab */
+
+  await db.collection("invites").doc(hash).set({
+
+    type: type,
+
+    inviterId: caller.uid,
+
+    createdAt: now,
+
+    expiresAt: now + 7 * 24 * 60 * 60 * 1000,
+
+    usedBy: null
+
+  });
+
+  return inviteResponse(res, 200, {
+
+    ok: true,
+
+    token: token,
+
+    type: type,
+
+    expiresInDays: 7
+
+  });
+}
+
+
+/* EINLADUNG ANNEHMEN */
+
+async function redeemInvite(req, res) {
+
+  const caller = await verifyFirebaseUser(req);
+
+  const body = await readInviteJson(req);
+
+  const token = body.token;
+
+  if (
+    typeof token !== "string" ||
+    !/^[a-f0-9]{64}$/.test(token)
+  ) {
+    return inviteResponse(res, 400, {
+      error: "Ungültiger Einladungscode."
+    });
+  }
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  const inviteRef = db
+    .collection("invites")
+    .doc(hash);
+
+  const userRef = db
+    .collection("users")
+    .doc(caller.uid);
+
+  /* Einladung und Benutzer atomar aktualisieren */
+
+  const result = await db.runTransaction(
+    async (transaction) => {
+
+      const invite = await transaction.get(inviteRef);
+
+      const user = await transaction.get(userRef);
+
+      if (!invite.exists) {
+        return {
+          status: 400,
+          error: "Einladung nicht gefunden."
+        };
+      }
+
+      const inviteData = invite.data();
+
+      if (
+        inviteData.usedBy ||
+        inviteData.expiresAt < Date.now()
+      ) {
+        return {
+          status: 400,
+          error: "Einladung abgelaufen oder bereits verwendet."
+        };
+      }
+
+      /* Bestehende Rollen dürfen nicht geändert werden */
+
+      if (user.exists) {
+
+        const existingRole = user.data().role;
+
+        if (
+          existingRole === "admin" ||
+          existingRole === "familie" ||
+          existingRole === "freund"
+        ) {
+          return {
+            status: 409,
+            error: "Dieses Konto ist bereits zugeordnet."
+          };
+        }
+      }
+
+      const inviterRef = db
+        .collection("users")
+        .doc(inviteData.inviterId);
+
+      const inviter = await transaction.get(inviterRef);
+
+      if (!inviter.exists) {
+        return {
+          status: 403,
+          error: "Einladende Person nicht gefunden."
+        };
+      }
+
+      const inviterData = inviter.data();
+
+      if (
+        inviterData.role !== "admin" &&
+        inviterData.role !== "familie"
+      ) {
+        return {
+          status: 403,
+          error: "Einladende Person ist nicht berechtigt."
+        };
+      }
+
+      /* Freundeseinladungen zusätzlich prüfen */
+
+      if (
+        inviteData.type === "freund" &&
+        inviterData.friendContact !== true
+      ) {
+        return {
+          status: 403,
+          error: "Freundeseinladung nicht erlaubt."
+        };
+      }
+
+      let updates;
+if (inviteData.type !== "freund") {
+  return {
+    status: 403,
+    error: "Familieneinladungen sind nicht erlaubt."
+  };
+}
+
+updates = {
+  role: "freund",
+  friendOwnerId: inviteData.inviterId
+};
+      
+      /* Benutzerrolle speichern */
+
+      transaction.set(
+        userRef,
+        updates,
+        { merge: true }
+      );
+
+      /* Einladung als verwendet markieren */
+
+      transaction.update(inviteRef, {
+
+        usedBy: caller.uid,
+
+        usedAt: Date.now()
+
+      });
+
+      return {
+        status: 200,
+        role: updates.role
+      };
+    }
+  );
+
+  if (result.status !== 200) {
+
+    return inviteResponse(res, result.status, {
+      error: result.error
+    });
+
+  }
+
+  return inviteResponse(res, 200, {
+
+    ok: true,
+
+    role: result.role
+
+  });
+}
 /* =====================================================
    WEB SERVER
 ===================================================== */
@@ -353,7 +644,60 @@ http.createServer(
 
       return;
     }
+/* =====================================================
+   EINLADUNGS-API
+===================================================== */
 
+if (
+  req.method === "POST" &&
+  (
+    req.url === "/invites/create" ||
+    req.url === "/invites/redeem"
+  )
+) {
+
+  try {
+
+    const allowedOrigins = [
+      "https://familienchat-5fc00.web.app",
+      "https://familienchat-5fc00.firebaseapp.com"
+    ];
+
+    if (
+      req.headers.origin &&
+      !allowedOrigins.includes(req.headers.origin)
+    ) {
+      return inviteResponse(res, 403, {
+        error: "Origin nicht erlaubt."
+      });
+    }
+
+    if (req.url === "/invites/create") {
+
+      await createInvite(req, res);
+
+    } else {
+
+      await redeemInvite(req, res);
+
+    }
+
+  } catch (error) {
+
+    console.error(
+      "Einladungsfehler:",
+      error.message
+    );
+
+    if (!res.headersSent) {
+      inviteResponse(res, 400, {
+        error: "Einladung konnte nicht verarbeitet werden."
+      });
+    }
+  }
+
+  return;
+}
 
     /* TURN CONFIG */
 
