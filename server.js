@@ -399,15 +399,6 @@ async function createInvite(req, res) {
 
   /* Freunde dürfen nur bestimmte Familienmitglieder einladen */
 
-  if (
-    type === "freund" &&
-    inviterData.friendContact !== true
-  ) {
-    return inviteResponse(res, 403, {
-      error: "Du darfst keine Freunde einladen."
-    });
-  }
-
   /* Sicheren Einladungscode erstellen */
 
   const token = crypto
@@ -555,17 +546,6 @@ async function redeemInvite(req, res) {
       }
 
       /* Freundeseinladungen zusätzlich prüfen */
-
-      if (
-        inviteData.type === "freund" &&
-        inviterData.friendContact !== true
-      ) {
-        return {
-          status: 403,
-          error: "Freundeseinladung nicht erlaubt."
-        };
-      }
-
       let updates;
 if (inviteData.type !== "freund") {
   return {
