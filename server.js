@@ -427,23 +427,98 @@ async function createInvite(req, res) {
     usedBy: null
 
   });
+return inviteResponse(res, 200, {
 
-  return inviteResponse(res, 200, {
+  ok: true,
 
-    ok: true,
+  token: token,
 
-    token: token,
+  type: type,
 
-    type: type,
+  expiresInDays: 7,
 
-    expiresInDays: 7
+  inviterName: inviterData.name || "Familienmitglied",
 
-  });
+  inviterPhoto: inviterData.profilePhotoUrl || ""
+
+});
 }
 
 
 /* EINLADUNG ANNEHMEN */
+async function previewInvite(req, res) {
 
+  const body = await readInviteJson(req);
+  const token = body.token;
+
+  if (
+    typeof token !== "string" ||
+    !/^[a-f0-9]{64}$/.test(token)
+  ) {
+    return inviteResponse(res, 400, {
+      error: "Ungültiger Einladungslink."
+    });
+  }
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(token)
+    .digest("hex");
+
+  const invite = await db
+    .collection("invites")
+    .doc(hash)
+    .get();
+
+  if (!invite.exists) {
+    return inviteResponse(res, 404, {
+      error: "Einladung nicht gefunden."
+    });
+  }
+
+  const data = invite.data();
+
+  if (data.usedBy || data.expiresAt < Date.now()) {
+    return inviteResponse(res, 400, {
+      error: "Einladung abgelaufen oder bereits verwendet."
+    });
+  }
+
+  if (data.type !== "freund") {
+    return inviteResponse(res, 403, {
+      error: "Ungültige Einladungsart."
+    });
+  }
+
+  const inviter = await db
+    .collection("users")
+    .doc(data.inviterId)
+    .get();
+
+  if (!inviter.exists) {
+    return inviteResponse(res, 404, {
+      error: "Einladende Person nicht gefunden."
+    });
+  }
+
+  const inviterData = inviter.data();
+
+  if (
+    inviterData.role !== "admin" &&
+    inviterData.role !== "familie"
+  ) {
+    return inviteResponse(res, 403, {
+      error: "Einladung nicht mehr gültig."
+    });
+  }
+
+  return inviteResponse(res, 200, {
+    ok: true,
+    type: "freund",
+    inviterName: inviterData.name || "Familienmitglied",
+    inviterPhoto: inviterData.profilePhotoUrl || ""
+  });
+}
 async function redeemInvite(req, res) {
 
   const caller = await verifyFirebaseUser(req);
@@ -627,12 +702,12 @@ http.createServer(
 /* =====================================================
    EINLADUNGS-API
 ===================================================== */
-
 if (
   req.method === "POST" &&
   (
     req.url === "/invites/create" ||
-    req.url === "/invites/redeem"
+    req.url === "/invites/redeem" ||
+    req.url === "/invites/preview"
   )
 ) {
 
@@ -652,16 +727,19 @@ if (
       });
     }
 
-    if (req.url === "/invites/create") {
+  if (req.url === "/invites/create") {
 
-      await createInvite(req, res);
+  await createInvite(req, res);
 
-    } else {
+} else if (req.url === "/invites/preview") {
 
-      await redeemInvite(req, res);
+  await previewInvite(req, res);
 
-    }
+} else {
 
+  await redeemInvite(req, res);
+
+}
   } catch (error) {
 
     console.error(
